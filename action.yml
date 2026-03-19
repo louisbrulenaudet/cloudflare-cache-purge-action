@@ -1,0 +1,58 @@
+name: "Cloudflare Cache Purge"
+description: "Invalidate Cloudflare CDN cache for a given zone via the REST API."
+
+inputs:
+  api_token:
+    description: "Cloudflare API token with Zone:Cache Purge permission."
+    required: true
+  zone_id:
+    description: "Cloudflare Zone ID of the domain to invalidate."
+    required: true
+  purge_everything:
+    description: "Set to 'true' to purge the entire zone cache."
+    required: false
+    default: "false"
+  files:
+    description: |
+      JSON array of absolute URLs to purge individually.
+      Ignored when purge_everything is 'true'.
+      Example: '["https://example.com/", "https://example.com/assets/app.js"]'
+    required: false
+    default: "[]"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Purge Cloudflare cache
+      shell: bash
+      env:
+        CF_API_TOKEN: ${{ inputs.api_token }}
+        CF_ZONE_ID: ${{ inputs.zone_id }}
+        PURGE_EVERYTHING: ${{ inputs.purge_everything }}
+        FILES: ${{ inputs.files }}
+      run: |
+        if [ "${PURGE_EVERYTHING}" = "true" ]; then
+          PAYLOAD='{"purge_everything":true}'
+        else
+          if ! echo "${FILES}" | jq -e . > /dev/null 2>&1; then
+            echo "::error::The 'files' input is not valid JSON. Provide a JSON array of URLs, e.g. '[\"https://example.com/\"]'."
+            exit 1
+          fi
+          PAYLOAD=$(jq -cn --argjson files "${FILES}" '{"files":$files}')
+        fi
+
+        RESPONSE=$(curl --silent --show-error \
+          --request POST \
+          --url "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/purge_cache" \
+          --header "Authorization: Bearer ${CF_API_TOKEN}" \
+          --header "Content-Type: application/json" \
+          --data "${PAYLOAD}")
+
+        if echo "${RESPONSE}" | jq -e '.success == true' > /dev/null; then
+          echo "✅ Cache purged successfully." | tee -a "${GITHUB_STEP_SUMMARY}"
+        else
+          ERRORS=$(echo "${RESPONSE}" | jq -r '[.errors[].message] | if length == 0 then ["unknown error"] else . end | join("; ")')
+          echo "::error::Cloudflare cache purge failed — ${ERRORS}"
+          echo "❌ Cache purge failed: ${ERRORS}" >> "${GITHUB_STEP_SUMMARY}"
+          exit 1
+        fi
